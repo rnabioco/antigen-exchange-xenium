@@ -1,0 +1,812 @@
+
+```{r "{{.x}} xenium setup", include = FALSE}
+# Slide to process
+slide <- {{.x}}
+
+# Default chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  echo    = FALSE,
+  dpi     = 250
+)
+
+# Clustering resolution
+xen_clst_rsln <- 10
+
+sffx <- str_c("_s", slide, ".qs")
+
+create_sobjs <- !file.exists(here(params$xen_dir, str_c("xen", sffx)))
+
+# Custom targets
+# * feature names cannot have underscores, Seurat will replace with dashes
+xen_ag_targets <- unname(params$xen_ag_targets)
+xen_ag_clmns   <- names(params$xen_ag_targets)
+
+custom_targets <- here(params$xen_custom_targets) %>%
+  read_csv(col_types = cols_only("c")) %>%
+  pull(1) %>%
+  unique() %>%
+  str_replace_all("_", "-")
+
+if (!all(xen_ag_targets %in% custom_targets)) {
+  cli_abort("Not all xen_ag_targets are present in xen_custom_")
+}
+```
+
+```{r "{{.x}} xenium functions"}
+.plot_full_fov <- function(df_in, fov_in, color, trace = list(), clrs,
+                           size = 0.3, trace_size = 1, trace_clr = "black") {
+  # Format input data
+  plt_theme <- umap_theme +
+    theme(
+      legend.title = element_blank(),
+      legend.text  = element_text(size = 28)
+    )
+  
+  dat <- df_in %>%
+    filter(fov == fov_in)
+  
+  n_dat <- dat %>%
+    group_by(!!sym(color)) %>%
+    summarize(n = n(), .groups = "drop") %>%
+    mutate(
+      n_lab = str_c(!!sym(color), "\nn = ", label_comma()(n))
+    )
+  
+  # Plot highlighted cells
+  res <- trace %>%
+    map(~ {
+      n_dat <- n_dat %>%
+        arrange(desc(!!sym(color) %in% .x), desc(n))
+      
+      n_labs <- set_names(n_dat$n_lab, n_dat[[color]])
+      
+      dat %>%
+        mutate(!!sym(color) := fct_relevel(!!sym(color), names(n_labs))) %>%
+        arrange(!!sym(color)) %>%
+        ggplot(aes(y_cell, x_cell, fill = !!sym(color))) +
+        geom_point_trace(
+          trace_position    = !!sym(color) %in% .x,
+          background_params = list(size = size, color = NA),
+          size  = trace_size,
+          color = trace_clr
+        ) +
+        scale_fill_manual(values = clrs, labels = n_labs) +
+        guides(fill = guide_legend(override.aes = list(size = 10, color = NA))) +
+        coord_fixed() +
+        plt_theme
+    })
+  
+  if (length(trace) == 1) res <- res[[1]]
+  
+  res
+}
+
+.process_xenium <- function(obj, dims = 1:40, resolution = c(1, 3, 5, 10)) {
+  
+  res <- obj %>%
+    SCTransform(assay = "Xenium") %>%
+    RunPCA(
+      assay    = "SCT",
+      npcs     = 50,
+      features = rownames(.)
+    ) %>%
+    
+    # Need to activate umap micromamba environment
+    # reticulate::use_condaenv("umap") 
+    RunUMAP(
+      assay       = "SCT",
+      reduction   = "pca",
+      dims        = dims,
+      umap.method = "umap-learn"
+    )
+  
+  res <- res %>%
+    FindNeighbors(
+      assay     = "SCT",
+      reduction = "pca",
+      dims      = dims
+    ) %>%
+    FindClusters(resolution = resolution)
+  
+  u_coords <- res %>%
+    FetchData(c("UMAP_1", "UMAP_2"))
+  
+  res <- res %>%
+    AddMetaData(u_coords)
+  
+  res
+}
+
+.classify_t_b <- function(obj, clmn) {
+  res <- obj %>%
+    classify_markers(
+      Ptprc > 0.7,
+      feats      = "Ptprc",
+      type_label = "other CD45+",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    ) %>%
+    classify_markers(
+      cell_type == "other CD45+" & Cd3d > 0.45,
+      feats      = c("cell_type", "Cd3d"),
+      type_label = "T cells",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    ) %>%
+    classify_markers(
+      cell_type == "other CD45+" & Cd19 > 1.1,
+      feats      = c("cell_type", "Cd19"),
+      type_label = "B cells",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    )
+  
+  res
+}
+
+.classify_dcs <- function(obj, clmn) {
+  res <- obj %>%
+    classify_markers(
+      cell_type == "other CD45+" & Itgax > 0.15,
+      feats      = c("cell_type", "Itgax"),
+      type_label = "other DC",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    ) %>% 
+    classify_markers(
+      cell_type == "other DC" & Sirpa > 0.15 & Itgam > 0.15,
+      feats      = c("cell_type", "Sirpa", "Itgam"),
+      type_label = "cDC2",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    ) %>%
+    classify_markers(
+      cell_type == "other DC" & Xcr1 > 0.15,
+      feats      = c("cell_type", "Xcr1"),
+      type_label = "cDC1",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    ) %>%
+    classify_markers(
+      cell_type %in% c("other DC", "other CD45+") & Siglech > 0.5,
+      feats      = c("cell_type", "Siglech"),
+      type_label = "Siglec-H DC",
+      clst_col   = clmn,
+      type_col   = "cell_type"
+    ) 
+  
+  res
+}
+
+plot_xenium <- function(df_in, dat_clmn, grp_clmn = NULL, clrs = NULL,
+                        x = "y_cell", y = "x_cell", ttl = NULL,
+                        pt_size = 0.35, outline = TRUE,
+                        trans = "identity", show_scale = TRUE, scale_len = 300,
+                        scale_linewidth = 1,
+                        scale_unit = "\u03BCm", scale_lab_pad = 0.05,
+                        scale_lab_size = 8, ...) {
+  
+  is_num <- !is.null(dat_clmn) && is.numeric(df_in[[dat_clmn]])
+  
+  if (is_num && length(clrs) == 1) clrs <- c("white", clrs)
+  
+  # Create UMAPs
+  res <- df_in %>%
+    plot_scatter(
+      dat_clmn,
+      x            = x,
+      y            = y,
+      group_col    = grp_clmn,
+      size         = pt_size,
+      stroke       = 0.75,
+      outline      = outline,
+      plot_colors  = clrs,
+      plot_lvls    = names(clrs),
+      trans        = trans,
+      label_params = list(size = 14),
+      ...
+    ) +
+    coord_fixed() +
+    umap_theme_2 +
+    theme(
+      legend.position = "bottom",
+      legend.text     = element_text(size = ttl_pt2),
+      strip.text      = element_text(size = ttl_pt2)
+    )
+  
+  if (is_num) {
+    res <- res +
+      guides(fill = guide_colorbar(
+        title.position = "top",
+        title          = ttl,
+        ticks          = FALSE
+      )) +
+      theme(
+        legend.key.width  = unit(35, "pt"),
+        legend.key.height = unit(7, "pt"),
+        legend.title      = element_text(size = ttl_pt2, hjust = 0.5)
+      )
+    
+  } else if (!is.null(dat_clmn)) {
+    res <- res +
+      guides(fill = guide_legend(
+        nrow           = 2,
+        title.position = "top",
+        title          = ttl,
+        override.aes   = list(size = 4, color = "black"),
+        reverse        = TRUE
+      )) +
+      theme(
+        legend.key.height = unit(35, "pt"),
+        legend.title      = element_blank()
+      )
+  }
+
+  # Add scale bar
+  scale_dat <- df_in %>%
+    summarize(
+      x    := min(!!sym(x)),
+      ymax := max(!!sym(y)),
+      y    := min(!!sym(y)),
+      xend  = x + scale_len,
+      yend  = y
+    ) %>%
+    mutate(
+      xlab      = median(c(x, xend)),
+      ylab      = abs(diff(c(ymax, y))),
+      ylab      = y + (ylab * scale_lab_pad),
+      scale_lab = str_c(c(as.character(scale_len), scale_unit), collapse = " ")
+    )
+  
+  if (show_scale) {
+    res <- res +
+      geom_segment(
+        aes(x = x, xend = xend, y = y, yend = yend, fill = NULL, color = NULL),
+        data = scale_dat,
+        linewidth = scale_linewidth
+      ) +
+      geom_text(
+        aes(xlab, ylab, label = scale_lab, fill = NULL, color = NULL),
+        data  = scale_dat,
+        size  = scale_lab_size / .pt
+      )
+  }
+  
+  res
+}
+```
+
+```{r "{{.x}} xenium create object", eval = create_sobjs}
+# Identify samples to load
+xen_dirs <- dir(
+  here(params$xen_res_dir),
+  pattern = params$xen_regex[[slide]],
+  full.names = TRUE
+)
+
+names(xen_dirs) <- xen_dirs %>%
+  str_extract("(?<=__)[A-Z](?=__)")
+
+# Create Seurat object
+# store custom targets as separate assay
+xen <- xen_dirs %>%
+  imap(~ {
+    obj <- .x %>%
+      LoadXenium(fov = .y) %>%
+      subset(nCount_Xenium > 0)
+    
+    gns <- rownames(obj)
+    gns <- gns[!gns %in% custom_targets]
+    
+    cstm <- obj %>%
+      subset(features = custom_targets)
+    
+    obj <- obj %>%
+      subset(features = gns)
+    
+    obj[["Xenium_custom"]] <- cstm@assays$Xenium
+    
+    obj
+  })
+```
+
+```{r "{{.x}} xenium process object", include = FALSE, eval = create_sobjs}
+# Process data
+# Add FOV labels
+xen <- xen %>%
+  imap(~ {
+    .x %>%
+      mutate_meta(mutate, fov = .y) %>%
+      .process_xenium(
+        dims = 1:40,
+        resolution = xen_clst_rsln
+      )
+  })
+
+# Identify Ag+ cells
+# * set Ag tag signals for each sample based on params$xen_samples
+ag_feats <- str_c("xenium_custom_", xen_ag_targets)
+
+xen <- xen %>%
+  imap(~ {
+    ag_info <- params$xen_samples[[.y]]
+    
+    .x %>%
+      AddMetaData(
+        FetchData(., ag_feats),
+        col.name = xen_ag_clmns
+      ) %>%
+      mutate_meta(~ {
+        .x %>%
+          rowwise() %>%
+          mutate(
+            mouse      = ag_info[[1]],
+            Ag_6wk_tag = ag_info[[2]],
+            Ag_3wk_tag = ag_info[[3]]
+          ) %>%
+          ungroup() %>%
+          mutate(
+            Ag_3wk_counts = ifelse(Ag_3wk_tag == 1, Ag_tag_1, Ag_tag_2),
+            Ag_6wk_counts = ifelse(Ag_6wk_tag == 1, Ag_tag_1, Ag_tag_2)
+          ) %>%
+          mutate(
+            Ag_counts = case_when(
+              mouse == "6wk"     ~ Ag_6wk_counts,
+              mouse == "3wk"     ~ Ag_3wk_counts,
+              mouse == "6wk-3wk" ~ Ag_6wk_counts + Ag_3wk_counts
+            ),
+            Ag_class = ifelse(Ag_counts > 0, "Ag-high", "Ag-low")
+          )
+      })
+  })
+```
+
+```{r "{{.x}} xenium cell type reference", eval = create_sobjs}
+# Create reference using scRNA-seq data
+# Run SCTransform separately, merge, PrepSCTFindMarkers to correct sequencing
+#   depth between samples
+ref_file <- here(params$xen_dir, "ref_so.qs")
+
+if (!file.exists(ref_file)) {
+  ref_so <- c("neg", "pos") %>%
+    map(~ {
+      file.path(params$so_dir, str_c("cd45", .x, "_so.qs")) %>%
+        qread() %>%
+        subset(mouse == "6wk") %>%
+        DietSeurat(assays = "RNA", dimreducs = FALSE)
+    })
+  
+  ref_so <- merge(ref_so[[1]], ref_so[-1])
+  
+  ref_so <- ref_so %>%
+    SCTransform(vst.flavor = "v2")
+
+  ref_so <- ref_so %>%
+    RunPCA(
+      assay    = "SCT",
+      npcs     = 50,
+      features = rownames(.)
+    ) %>%
+    RunUMAP(
+      assay       = "SCT",
+      reduction   = "pca",
+      dims        = 1:40,
+      umap.method = "umap-learn"
+    )
+  
+  # Filter object to reduce memory requirement
+  ref_so <- ref_so %>%
+    AddMetaData(FetchData(., c("UMAP_1", "UMAP_2"))) %>%
+    DietSeurat(assays = c("SCT", "RNA"))
+  
+  # ref_so@assays$SCT@counts <- matrix(nrow = 0, ncol = 0)
+  
+  ref_so %>%
+    qsave(ref_file)
+  
+} else {
+  ref_so <- qread(ref_file)
+}
+```
+
+```{r "{{.x}} xenium cell type annotations", eval = create_sobjs}
+# Identify transfer anchors
+anchors <- xen %>%
+  map(~ {
+    FindTransferAnchors(
+      ref_so,
+      query = .x,
+      query.assay = "SCT",
+      normalization.method = "SCT"
+    )
+  })
+
+preds <- xen %>%
+  imap(~ {
+    TransferData(
+      anchorset        = anchors[[.y]],
+      refdata          = ref_so$cell_type,
+      prediction.assay = TRUE,
+      weight.reduction = .x[["pca"]],
+      dims             = 1:40
+    )
+  })
+
+anchors %>%
+  qsave(here(params$xen_dir, str_c("ref_anchors", sffx)))
+
+preds %>%
+  qsave(here(params$xen_dir, str_c("ref_preds", sffx)))
+
+# Predict cell types for Xenium data
+xen <- xen %>%
+  imap(~ {
+    .x[["preds"]] <- preds[[.y]]
+    
+    xen_types <- .x@assays$preds@data %>%
+      as_tibble(rownames = "cell_type") %>%
+      pivot_longer(-cell_type, values_to = "pred_conf") %>%
+      filter(cell_type != "max") %>%
+      group_by(name) %>%
+      filter(pred_conf == max(pred_conf)) %>%
+      mutate(cell_type = if_else(n() > 1, "unassigned", cell_type)) %>%
+      ungroup() %>%
+      column_to_rownames("name")
+    
+    .x %>%
+      AddMetaData(xen_types) %>%
+      mutate_meta(
+        mutate,
+        Ag_type = ifelse(Ag_class == "Ag-high", cell_type, "Ag-low")
+      )
+  })
+
+# Merge objects
+xen <- merge(xen[[1]], xen[-1], add.cell.ids = names(xen))
+
+rm(ref_so)
+gc()
+```
+
+```{r "{{.x}} xenium refine annotations", eval = create_sobjs}
+# Each FOV was clustered separately, so add FOV ID to cluster ID
+xen_clst_clmn <- str_c("SCT_snn_res.", xen_clst_rsln)
+
+xen <- xen %>%
+  mutate_meta(~ {
+    .x %>%
+      rename(rough_type = cell_type) %>%
+      mutate(!!sym(clst_clmn) := str_c(fov, "_", !!sym(clst_clmn)))
+  })
+
+# Identify CD45+/- cells
+xen <- xen %>%
+  mutate_meta(
+    mutate,
+    cd45_class = "other",
+    cell_type  = rough_type
+  ) %>%
+  classify_markers(
+    feats      = "Ptprc",
+    filt       = Ptprc > 1,
+    clst_col   = xen_clst_clmn,
+    type_label = "CD45+",
+    type_col   = "cd45_class"
+  ) %>%
+  classify_markers(
+    feats      = "Ptprc",
+    filt       = Ptprc <= 1,
+    clst_col   = xen_clst_clmn,
+    type_label = "CD45-",
+    type_col   = "cd45_class"
+  )
+
+# Refine cell types based on prediction confidence
+# * set adipose tissue as unassigned based on Car3 expression
+# * set epithelial cells as unassigned since they appear to express CD45
+xen <- xen %>%
+  mutate_meta(
+    mutate,
+    cell_type = if_else(pred_conf > 0.5, rough_type, "unassigned")
+  ) %>%
+  classify_markers(
+    feats      = "Car3",
+    filt       = Car3 > 0.75,
+    clst_col   = xen_clst_clmn,
+    type_label = "unassigned",
+    type_col   = "cell_type"
+  ) %>%
+  mutate_meta(
+    mutate,
+    cell_type = if_else(
+      cell_type %in% c("unassigned", "Epithelial cells"),
+      str_c("other ", cd45_class),
+      cell_type
+    ),
+    Ag_type = ifelse(Ag_class == "Ag-high", cell_type, "Ag-low")
+  )
+
+# Refine B/T cell annotations based on CD19 and CD3 expression
+xen <- xen %>%
+  classify_markers(
+    feats      = "Cd19",
+    filt       = Cd19 > 1.1,
+    type_label = "B cells",
+    clst_col   = xen_clst_clmn,
+    type_col   = "cell_type"
+  ) %>%
+  classify_markers(
+    feats      = "Cd3d",
+    filt       = Cd3d > 0.6,
+    type_label = "T cells",
+    clst_col   = xen_clst_clmn,
+    type_col   = "cell_type"
+  )
+```
+
+```{r "{{.x}} xenium create lec/frc objects", include = FALSE, eval = create_sobjs}
+# Process data
+type_key <- c(lec = "LEC", frc = "Fibroblasts")
+
+cd45neg <- type_key %>%
+  imap(~ {
+    obj <- xen %>%
+      subset(cell_type == .x) %>%
+      .process_xenium(
+        dims = 1:30,
+        resolution = c(1, 2, 3, 5)
+      )
+    
+    obj
+  })
+
+# Split list
+lec <- cd45neg$lec
+frc <- cd45neg$frc
+
+rm(cd45neg)
+gc()
+```
+
+```{r "{{.x}} xenium calculate distance from Ag+ LEC", eval = create_sobjs}
+# Calculate distance from closest Ag+ LEC
+# * this will only return cell coordinates for FOVs with Ag+ LECs
+# * FOV F will not have cell coordinates, this column will be all `NA`s
+fovs <- sort(unique(xen$fov))
+
+dists <- fovs %>%
+  map_dfr(~ {
+    # Pull cell centroid coordinates
+    cell_coords <- xen@images[[.x]]@boundaries$centroids
+    
+    cell_coords <- cell_coords@coords %>%
+      as_tibble() %>%
+      mutate(.cell_id = cell_coords@cells)
+    
+    cell_meta <- xen@meta.data %>%
+      filter(fov == .x) %>%
+      as_tibble(rownames = ".cell_id") %>%
+      dplyr::select(.cell_id, cell_type, Ag_class)
+    
+    stopifnot(identical(cell_coords$.cell_id, cell_meta$.cell_id))
+    
+    cell_meta <- cell_meta %>%
+      left_join(cell_coords, by = ".cell_id")
+    
+    # Convert to sf object (sp package is deprecated)
+    # * first convert to sp::SpatialPolygonsDataFrame
+    # * mol <- obj@images$A@molecules$molecules$GeoMx_Barcode01_ERCC00142
+    # * ensure geometries are valid
+    cells <- xen@images[[.x]]@boundaries$segmentation@polygons
+    plys  <- SpatialPolygons(cells)
+    
+    plys <- SpatialPolygonsDataFrame(
+      plys,
+      data = data.frame(
+        id        = seq_along(cells),
+        cell_type = cell_meta$cell_type,
+        Ag_class  = cell_meta$Ag_class,
+        row.names = map_chr(cells, ~ .x@ID)
+      )
+    )
+    
+    plys <- plys %>%
+      st_as_sf() %>%
+      st_make_valid()
+    
+    # Pull cell types
+    lecs <- cell_meta %>%
+      filter(cell_type == "LEC" & Ag_class == "Ag-high")
+    
+    if (nrow(lecs) == 0) return(NULL)
+    
+    # Calculate distances between each LEC and all other cells
+    dists <- st_distance(plys[lecs$.cell_id, ], plys)
+    
+    rownames(dists) <- lecs$.cell_id
+    colnames(dists) <- rownames(plys)
+    
+    dists <- dists %>%
+      as_tibble(rownames = "lec_id") %>%
+      pivot_longer(-lec_id, names_to = "other", values_to = "lec_dist") %>%
+      left_join(cell_meta, by = c(other = ".cell_id"))
+    
+    dists <- dists %>%
+      left_join(
+        cell_coords,
+        by     = c(lec_id = ".cell_id"),
+        suffix = c("_cell", "_lec")
+      )
+    
+    stopifnot(nrow(dists) == (n_distinct(lecs$.cell_id) * n_distinct(rownames(plys))))
+    
+    # Determine closest LEC
+    # * there are a very small number of ties (<50 cells)
+    res <- dists %>%
+      group_by(other) %>%
+      mutate(
+        closest = lec_dist == min(lec_dist),
+        fov = .x
+      ) %>%
+      ungroup()
+
+    res
+  })
+
+dist_meta <- dists %>%
+  filter(closest) %>%
+  group_by(other) %>%
+  slice(1) %>%
+  ungroup() %>%
+  dplyr::select(other, lec_id, lec_dist, matches("^[xy]_")) %>%
+  column_to_rownames("other")
+
+xen <- xen %>%
+  AddMetaData(dist_meta)
+```
+
+```{r "{{.x}} xenium lec types", eval = create_sobjs}
+# Annotate LEC types
+# * automated threshold leaves a small Marco-high cluster as unassigned
+lec_clst_clmn <- "SCT_snn_res.3"
+
+ann <- clustify(
+  input       = lec@assays$SCT@data,
+  ref_mat     = ref_LEC_xiang,
+  metadata    = lec@meta.data,
+  cluster_col = lec_clst_clmn,
+  vec_out     = TRUE,
+  threshold   = 0.55
+)
+
+names(ann) <- colnames(lec)
+
+lec <- lec %>%
+  AddMetaData(ann, col.name = "lec_type")
+
+# Add annotations to meta.data
+lec <- lec %>%
+  mutate_meta(
+    mutate,
+    Ag_type = ifelse(Ag_class == "Ag-high", lec_type, "Ag-low")
+  )
+
+xen <- xen %>%
+  AddMetaData(lec$lec_type, col.name = "lec_type") %>%
+  mutate_meta(
+    mutate,
+    lec_type = replace_na(lec_type, "other")
+  )
+
+# Save objects
+lec %>%
+  save_objs(str_c("lec_s", slide), params$xen_dir)
+
+frc %>%
+  save_objs(str_c("frc_s", slide), params$xen_dir)
+
+rm(lec, frc)
+gc()
+```
+
+```{r "{{.x}} xenium small object", eval = create_sobjs}
+# Format Ag labels
+dcs <- xen$cell_type %>%
+  unique() %>%
+  grep("DC", ., value = TRUE) %>%
+  sort()
+
+lecs <- xen$lec_type %>%
+  table() %>%
+  sort() %>%
+  rev() %>%
+  names()
+
+lecs <- lecs[lecs != "other"]
+
+top_types <- c("LEC", dcs)
+
+xen <- xen %>%
+  mutate_meta(
+    mutate,
+    lec_Ag_type    = ifelse(Ag_class == "Ag-high", as.character(lec_type), "Ag-low"),
+    lec_Ag_type    = fct_relevel(lec_Ag_type, lecs),
+    lec_dc_type    = ifelse(cell_type %in% top_types, as.character(cell_type), "other"),
+    lec_dc_type    = fct_relevel(lec_dc_type, top_types),
+    lec_dc_Ag_type = ifelse(Ag_class == "Ag-high", as.character(lec_dc_type), "Ag-low"),
+    lec_dc_Ag_type = fct_relevel(lec_dc_Ag_type, top_types)
+  )
+
+# Select subset of cells to plot
+# * too many points to plot, downsample when plotting sections
+set.seed(42)
+
+plt_cells <- sample(colnames(xen), 50000)
+
+plt_cells <- xen@meta.data %>%
+  filter(cell_type %in% top_types | Ag_class == "Ag-high") %>%
+  rownames() %>%
+  c(plt_cells) %>%
+  unique()
+
+plt_cells <- xen@meta.data[plt_cells, ] %>%
+  mutate(cell_type = fct_relevel(cell_type, top_types)) %>%
+  arrange(cell_type) %>%
+  rownames()
+
+small <- xen %>%
+  subset(cells = plt_cells)
+
+# Save objects
+xen %>%
+  save_objs(
+    prfx   = str_c("xen_s", slide),
+    ob_dir = params$xen_dir
+  )
+
+small %>%
+  save_objs(
+    prfx   = str_c("small_s", slide),
+    ob_dir = params$xen_dir
+  )
+
+rm(xen, small)
+gc()
+```
+
+
+```{r "{{.x}} xenium giotto object", eval = FALSE}
+# Identify samples to load
+xen_dirs <- dir(
+  here(params$xen_res_dir),
+  pattern = params$xen_regex[[slide]],
+  full.names = TRUE
+)
+
+names(xen_dirs) <- xen_dirs %>%
+  str_extract("(?<=__)[A-Z](?=__)")
+
+# Create Seurat object
+# store custom targets as separate assay
+xen <- xen_dirs %>%
+  imap(~ {
+    obj <- .x %>%
+      LoadXenium(fov = .y) %>%
+      subset(nCount_Xenium > 0)
+    
+    gns <- rownames(obj)
+    gns <- gns[!gns %in% custom_targets]
+    
+    cstm <- obj %>%
+      subset(features = custom_targets)
+    
+    obj <- obj %>%
+      subset(features = gns)
+    
+    obj[["Xenium_custom"]] <- cstm@assays$Xenium
+    
+    obj
+  })
+```

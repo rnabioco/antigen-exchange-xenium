@@ -1,0 +1,57 @@
+
+```{r "main setup", include = FALSE, warning = FALSE, message = FALSE}
+# Default chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  echo    = FALSE,
+  dpi     = 300
+)
+
+# scRNA-seq
+library(Seurat)
+library(clustifyr)
+library(clustifyrdata)  # rnabioco
+library(presto)         # immunogenomics
+library(harmony)
+library(djvdj)
+library(M3Drop)
+library(hdf5r)
+
+# Plotting
+library(ggspruce)       # sheridar
+library(scales)
+library(ggforce)
+library(ggbeeswarm)
+library(cowplot)
+library(ggrepel)
+library(RColorBrewer)
+library(colorblindr)    # clauswilke
+library(patchwork)
+library(ggtext)
+library(ggtrace)
+library(ggVennDiagram)
+library(MetBrewer)
+library(ggtree)
+library(qs)
+library(openxlsx)
+library(xlsx)
+library(ComplexHeatmap)
+library(png)
+library(pzfx)
+
+# Tidyverse
+library(tidyverse)
+library(knitr)
+library(broom)
+library(here)
+library(devtools)
+library(cli)
+
+# Xenium
+library(Giotto)         # drieslab
+library(sf)
+library(sp)
+
+source(here(params$template_dir, "funs.R"))
+```
