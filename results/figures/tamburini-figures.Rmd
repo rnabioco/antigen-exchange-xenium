@@ -45,6 +45,11 @@ knitr::opts_chunk$set(
   dpi     = 300
 )
 
+# Set python environment
+reticulate::use_condaenv("umap-2", conda = "~/.local/bin/micromamba")
+
+GiottoClass::set_giotto_python_path("umap-2")
+
 # Main setup
 knitr::knit(here::here(params$template_dir, "setup.Rmd"), "")
 
@@ -78,12 +83,6 @@ m_key <- c(
   `6wk`     = "42 day",
   `6wk-3wk` = "dual"
 )
-
-# Experiment to show in main figures
-ag_exps <- list(LEC = "exp-1", DC = "exp-2")
-
-# LEC/DC subset colors
-subtype_clrs <- list(LEC = lec_clrs, DC = dc_clrs)
 ```
 
 ```{r "load xenium data", include = FALSE}
@@ -164,12 +163,55 @@ xen <- xen %>%
   ) %>%
   arrange(Ag_class)
 
-# Xenium colors
-xen_clrs <- typ_clrs
+# # Xenium colors
+# xen_clrs <- typ_clrs
+# 
+# xen_clrs["Mon/Mac"] <- typ_clrs["Macrophages"]
+# 
+# xen_clrs <- xen_clrs[names(xen_clrs) %in% xen$cell_type]
+```
 
-xen_clrs["Mon/Mac"] <- typ_clrs["Macrophages"]
+```{r "giotto object", eval = FALSE}
+# Identify samples to load
+xen_dirs <- dir(
+  here(params$xen_res_dir),
+  pattern = params$xen_regex[[slide]],
+  full.names = TRUE
+)
 
-xen_clrs <- xen_clrs[names(xen_clrs) %in% xen$cell_type]
+names(xen_dirs) <- xen_dirs %>%
+  str_extract("(?<=__)[A-Z](?=__)")
+
+# Create Giotto object
+# * store custom targets as separate assay
+meta <- xen %>%
+  filter(slide == "section 1") %>%
+  select(cell_ID = cell_id, cell_type, Ag_class) %>%
+  mutate(cell_type = str_c(cell_type, " (", Ag_class, ")")) %>%
+  select(-Ag_class) %>%
+  readCellMetadata()
+
+obj <- xen_dirs[[top_fov]] %>%
+  createGiottoXeniumObject() %>%
+  setCellMetadata(meta)
+
+# Spatial network
+obj <- obj %>%
+  createSpatialDelaunayNetwork(
+    spat_unit = "cell",
+    feat_type = "rna"
+  )
+
+obj %>%
+  qsave(here("results/net_gio.qs"))
+
+obj <- qread(here("results/net_gio.qs"))
+
+# Spatial correlation
+prox <- obj %>%
+  cellProximityEnrichment(
+    cluster_column = "cell_type"
+  )
 ```
 
 ## Figure 4

@@ -775,38 +775,3 @@ small %>%
 rm(xen, small)
 gc()
 ```
-
-
-```{r "{{.x}} xenium giotto object", eval = FALSE}
-# Identify samples to load
-xen_dirs <- dir(
-  here(params$xen_res_dir),
-  pattern = params$xen_regex[[slide]],
-  full.names = TRUE
-)
-
-names(xen_dirs) <- xen_dirs %>%
-  str_extract("(?<=__)[A-Z](?=__)")
-
-# Create Seurat object
-# store custom targets as separate assay
-xen <- xen_dirs %>%
-  imap(~ {
-    obj <- .x %>%
-      LoadXenium(fov = .y) %>%
-      subset(nCount_Xenium > 0)
-    
-    gns <- rownames(obj)
-    gns <- gns[!gns %in% custom_targets]
-    
-    cstm <- obj %>%
-      subset(features = custom_targets)
-    
-    obj <- obj %>%
-      subset(features = gns)
-    
-    obj[["Xenium_custom"]] <- cstm@assays$Xenium
-    
-    obj
-  })
-```
