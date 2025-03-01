@@ -162,298 +162,74 @@ xen <- xen %>%
     slide    = str_c("section ", slide)
   ) %>%
   arrange(Ag_class)
-
-# # Xenium colors
-# xen_clrs <- typ_clrs
-# 
-# xen_clrs["Mon/Mac"] <- typ_clrs["Macrophages"]
-# 
-# xen_clrs <- xen_clrs[names(xen_clrs) %in% xen$cell_type]
 ```
 
 ```{r "giotto object", eval = FALSE}
-# Identify samples to load
-xen_dirs <- dir(
-  here(params$xen_res_dir),
-  pattern = params$xen_regex[[1]],
-  full.names = TRUE
-)
-
-names(xen_dirs) <- xen_dirs %>%
-  str_extract("(?<=__)[A-Z](?=__)")
-
-# Create Giotto object
-# * store custom targets as separate assay
-meta <- xen %>%
-  filter(
-    slide == "section 1",
-    fov   == top_fov
-  ) %>%
-  select(cell_ID = cell_id, cell_type, Ag_class) %>%
-  mutate(
-    cell_type = str_c(cell_type, " (", Ag_class, ")"),
-    cell_ID = str_remove(cell_ID, "^[A-Z]_")
-  ) %>%
-  select(-Ag_class) %>%
-  readCellMetadata()
-
-obj <- xen_dirs[[top_fov]] %>%
-  createGiottoXeniumObject() %>%
-  setCellMetadata(meta)
-
-# Spatial network
-obj <- obj %>%
-  createSpatialDelaunayNetwork(
-    spat_unit = "cell",
-    feat_type = "rna"
-  )
-
-obj %>%
-  qsave(here("results/gio.qs"))
-
-# Spatial correlation
-prox <- obj %>%
-  cellProximityEnrichment(
-    spat_unit      = "cell",
-    feat_type      = "rna",
-    cluster_column = "cell_type"
-  )
-
-prox %>%
-  qsave(here("results/prox.qs"))
-
-prox <- qread(here("results/prox.qs"))
-
-# Create plots
-obj %>%
-  cellProximityBarplot(prox)
-```
-
-## Figure 4
-
-*Antigen exchange with DCs correlates with levels of antigen archiving*
-
-A.  Antigen counts are shown for adjacent LN tissue sections from
-    a dual-immunized mouse analyzed with the Xenium platform.
-B.  Localization of Ag+ and Ag- cells is shown for LECs for tissue sections
-    from A.
-C.  Localization of Ag+ and Ag- cells is shown for DCs for tissue sections from
-    A.
-C.  The distance to the closest Ag+ LEC is shown for Ag+ and Ag- DCs for tissue
-    sections from A.
-D.  Mean 21 day Ag-score is shown for DCs from mice that received a single
-    vaccination (21 day or 42 day) or dual vaccination (21 day and 42 day).
-E.  Ag-score is shown for single and dual vaccinations for the 21 day timepoint
-    for DC subsets with highest Ag-score. Other timepoints are shown in grey.
-    P values were calculated using a one-sided Wilcoxon rank sum test with
-    Benjamini-Hochberg correction.
-F.  Mean 42 day Ag-score is shown for DCs from mice that received single or
-    dual vaccination as described in F.
-G.  Ag-score is shown for single and dual vaccinations for the 42 day timepoint
-    as described in G.
-
-```{r "xenium Ag counts"}
-# Format plot data
-xen_dat <- xen %>%
-  filter(fov %in% top_fov) %>%
-  mutate(
-    type_ag = if_else(
-      cell_type %in% c("LEC", "DC", "B cells"),
-      cell_type,
-      "other"
-    ),
-    type_ag = fct_relevel(type_ag, c("LEC", "DC", "other")),
+# Perform cell proximity analysis for section D
+prox_res <- params$xen_regex %>%
+  imap(~ {
+    xen_dirs <- dir(
+      here(params$xen_res_dir),
+      pattern    = .x,
+      full.names = TRUE
+    )
     
-    Ag_class = fct_relevel(Ag_class, rev(unname(xen_ag_classes))),
+    names(xen_dirs) <- xen_dirs %>%
+      str_extract("(?<=__)[A-Z](?=__)")
     
-    type_ag = if_else(
-      type_ag %in% c("LEC", "DC"),
-      str_c(type_ag, " (", Ag_class, ")"),
-      type_ag
-    ),
+    # Create Giotto object
+    # * store custom targets as separate assay
+    meta <- xen %>%
+      filter(
+        slide == str_c("section ", .y),
+        fov   == top_fov
+      ) %>%
+      select(cell_ID = cell_id, cell_type, Ag_class) %>%
+      mutate(
+        cell_type = str_c(cell_type, " (", Ag_class, ")"),
+        cell_ID   = str_remove(cell_ID, "^[A-Z]_")
+      ) %>%
+      select(-Ag_class) %>%
+      readCellMetadata()
     
-    lec_ag = ifelse(cell_type %in% c("LEC", "B cells"), type_ag, "other"),
-    dc_ag  = ifelse(cell_type %in% c("DC", "B cells"),  type_ag, "other"),
-  ) %>%
-  arrange(type_ag, Ag_class) %>%
-  mutate(
-    across(c(type_ag, lec_ag, dc_ag), ~ fct_relevel(.x, unique(type_ag))),
-    slide = fct_relevel(slide, str_c("section ", xen_slides))
-  )
-
-# Plot Ag+ cells
-# * add pseudo count
-ag_sig_fig <- xen_dat %>%
-  mutate(Ag_counts = Ag_counts + 1) %>%
-  plot_xenium(
-    "Ag_counts",
-    grp_clmn       = "slide",
-    clrs           = c("white", xen_clrs[["LEC"]]),
-    ttl            = "Ag counts + 1",
-    trans          = "log10",
-    trace_position = "bottom",
-    panel_nrow     = 2
-  )
-```
-
-```{r "xenium Ag class"}
-# Adjust color palette
-new_clrs <- c("white", xen_clrs[c("B cells", "DC", "LEC")]) %>%
-  expand_colors(
-    n             = c(1, 1, 2, 2),
-    keep_original = TRUE,
-    filter        = c("deutan", "protan", "tritan"),
-    difference    = Inf,
-    direction     = -1,
-    range         = c(10, 90),
-    maxit         = 2000
-  ) %>%
-  rev()
-
-names(new_clrs) <- c(
-  "LEC (Ag+)", "LEC (Ag-)",
-  "DC (Ag+)", "DC (Ag-)",
-  "B cells", "other"
-)
-
-# Plot Ag+ cells
-ag_pos_fig <- c("lec_ag", "dc_ag") %>%
-  map(~ {
-    xen_dat %>%
-      plot_xenium(
-        .x,
-        grp_clmn       = "slide",
-        clrs           = new_clrs,
-        pt_size        = 0.2,
-        trace_position = "bottom",
-        panel_nrow     = 2
+    obj <- xen_dirs[[top_fov]] %>%
+      createGiottoXeniumObject() %>%
+      setCellMetadata(meta)
+    
+    # Spatial network
+    obj <- obj %>%
+      createSpatialDelaunayNetwork(
+        spat_unit = "cell",
+        feat_type = "rna"
       )
+    
+    obj %>%
+      qsave(here(str_c("results/gio_s", .y, ".qs")))
+      
+    # Spatial correlation
+    prox <- obj %>%
+      cellProximityEnrichment(
+        spat_unit      = "cell",
+        feat_type      = "rna",
+        cluster_column = "cell_type"
+      )
+    
+    prox %>%
+      qsave(here(str_c("results/prox_s", .y, ".qs")))
+    
+    prox
   })
-```
 
-```{r "xenium LEC proximity", fig.width = 18, fig.height = 13}
-# Format data for histograms
-hist_dat <- xen_dat %>%
-  filter(cell_type == "DC")
-  
-# Format data for median lines
-ln_dat <- hist_dat %>%
-  group_by(slide, fov, cell_type, Ag_class) %>%
-  summarize(
-    lec_dist = median(lec_dist),
-    n        = n(),
-    .groups  = "drop"
-  )
+# Save proximity enrichment results
+prox_df <- prox_res %>%
+  imap_dfr(~ {
+    .x$enrichm_res %>%
+      as_tibble() %>%
+      mutate(slide = str_c("section ", .y))
+  })
 
-# Format data for n labels
-n_dat <- ln_dat %>%
-  group_by(slide, fov, cell_type) %>%
-  mutate(
-    n_lab = str_c(Ag_class, " ", label_comma()(n), " cells")
-  ) %>%
-  summarize(
-    n_lab = str_c(n_lab, collapse = "\n"),
-    .groups = "drop"
-  )
-
-# Format data for p-values
-p_dat <- hist_dat %>%
-  group_by(slide, fov, cell_type) %>%
-  summarize(
-    p = wilcox.test(
-      lec_dist[Ag_class == "Ag+"],
-      lec_dist[Ag_class == "Ag-"],
-      alternative = "less"
-    )$p.value,
-    .groups = "drop"
-  ) %>%
-  mutate(p_adj = p.adjust(p, method = "BH")) %>%
-  rowwise() %>%
-  mutate(
-    p_lab = .format_pvalue(p_adj),
-    p_lab = ifelse(
-      p_adj != 0,
-      str_c("italic(p) == ", p_lab),
-      p_lab
-    )
-  ) %>%
-  ungroup()
-
-# Plot distance from nearest Ag+ LEC
-hist <- hist_dat %>%
-  mutate(lec_dist = lec_dist + 1) %>%  # ADD 1
-  ggplot(aes(lec_dist, fill = Ag_class, alpha = Ag_class)) +
-  
-  geom_density(aes(color = Ag_class)) +
-  geom_vline(
-    aes(xintercept = lec_dist, color = Ag_class, alpha = NULL),
-    data      = ln_dat,
-    linetype  = 2,
-    linewidth = 0.75,
-    show.legend = FALSE
-  ) +
-  
-  geom_text(
-    aes(x = 1, y = Inf, label = n_lab, fill = NULL, alpha = NULL),
-    data = n_dat,
-    hjust = 0,
-    vjust = 1.2,
-    size  = txt_pt2 / .pt,
-    show.legend = FALSE
-  ) +
-  
-  geom_text(
-    aes(x = Inf, y = Inf, label = p_lab, fill = NULL, alpha = NULL),
-    data  = p_dat,
-    parse = TRUE,
-    hjust = 1.1,
-    vjust = 1.2,
-    size  = txt_pt2 / .pt,
-    show.legend = FALSE
-  ) +
-  
-  facet_wrap(~ slide, nrow = 1) +
-  labs(x = "distance from nearest Ag+ LEC (\U00B5m)", y = "density") +
-  scale_fill_manual(values  = c(`Ag-` = other_clr, `Ag+` = xen_clrs[["LEC"]])) +
-  scale_color_manual(values = c(`Ag-` = "black",  `Ag+` = xen_clrs[["LEC"]])) +
-  scale_alpha_manual(values = c(`Ag-` = 0.5,      `Ag+` = 0.85)) +
-  scale_x_log10() +
-  scale_y_continuous(expand = expansion(c(0.05, 0.2))) +
-  base_theme +
-  theme(
-    aspect.ratio    = 0.5,
-    legend.position = "right",
-    legend.title    = element_blank(),
-    strip.text      = element_text(size = ttl_pt2),
-    legend.text     = element_text(size = ttl_pt2),
-    axis.title      = element_text(size = ttl_pt2)
-  )
-```
-
-```{r "xenium figure", fig.width = 14, fig.height = 8.5}
-top <- append(list(ag_sig_fig), ag_pos_fig) %>%
-  imap(~ .x + labs(tag = LETTERS[.y])) %>%
-  wrap_plots(nrow = 1)
-
-bot <- wrap_plots(
-  plot_spacer(), hist + labs(tag = "D"), plot_spacer(),
-  nrow = 1,
-  widths = c(0.3, 1, 0.3)
-)
-
-xen_fig <- wrap_plots(
-  top, bot,
-  ncol = 1,
-  heights = c(1, 0.35)
-) &
-  theme(
-    plot.tag = element_text(
-      size  = ttl_pt2 * 1.5,
-      face  = "bold",
-      hjust = 2,
-      vjust = -0.2
-    )
-  )
+prox_df %>%
+  write_tsv(here("results/prox.tsv.gz"))
 ```
 
 ---
@@ -466,33 +242,4 @@ xen_fig <- wrap_plots(
 
 ```{r "session info"}
 sessionInfo()
-```
-
-```{r "xenium metadata for geo", eval = FALSE}
-clmns <- c(
-  "cell_id",
-  "slide",
-  "fov",
-  "mouse",
-  "tm",
-  "nCount_Xenium",
-  "nFeature_Xenium",
-  "UMAP_1", "UMAP_2",
-  "cell_type",
-  "Ag_class",
-  "x_cell", "y_cell",
-  "lec_dist",
-  "Ag_3wk_counts",
-  "Ag_6wk_counts"
-)
-
-metadat <- xen %>%
-  mutate(
-    tm = str_c(tm_key[mouse], " day"),
-    tm = replace_na(tm, "dual")
-  ) %>%
-  select(all_of(clmns))
-
-metadat %>%
-  write_tsv(here(params$geo_dir, "xenium_metadata.tsv.gz"))
 ```
