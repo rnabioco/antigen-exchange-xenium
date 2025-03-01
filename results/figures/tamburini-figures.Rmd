@@ -46,9 +46,9 @@ knitr::opts_chunk$set(
 )
 
 # Set python environment
-reticulate::use_condaenv("umap-2", conda = "~/.local/bin/micromamba")
+reticulate::use_condaenv("umap", conda = "~/.local/bin/micromamba")
 
-GiottoClass::set_giotto_python_path("umap-2")
+GiottoClass::set_giotto_python_path("umap")
 
 # Main setup
 knitr::knit(here::here(params$template_dir, "setup.Rmd"), "")
@@ -175,7 +175,7 @@ xen <- xen %>%
 # Identify samples to load
 xen_dirs <- dir(
   here(params$xen_res_dir),
-  pattern = params$xen_regex[[slide]],
+  pattern = params$xen_regex[[1]],
   full.names = TRUE
 )
 
@@ -185,9 +185,15 @@ names(xen_dirs) <- xen_dirs %>%
 # Create Giotto object
 # * store custom targets as separate assay
 meta <- xen %>%
-  filter(slide == "section 1") %>%
+  filter(
+    slide == "section 1",
+    fov   == top_fov
+  ) %>%
   select(cell_ID = cell_id, cell_type, Ag_class) %>%
-  mutate(cell_type = str_c(cell_type, " (", Ag_class, ")")) %>%
+  mutate(
+    cell_type = str_c(cell_type, " (", Ag_class, ")"),
+    cell_ID = str_remove(cell_ID, "^[A-Z]_")
+  ) %>%
   select(-Ag_class) %>%
   readCellMetadata()
 
@@ -203,15 +209,24 @@ obj <- obj %>%
   )
 
 obj %>%
-  qsave(here("results/net_gio.qs"))
-
-obj <- qread(here("results/net_gio.qs"))
+  qsave(here("results/gio.qs"))
 
 # Spatial correlation
 prox <- obj %>%
   cellProximityEnrichment(
+    spat_unit      = "cell",
+    feat_type      = "rna",
     cluster_column = "cell_type"
   )
+
+prox %>%
+  qsave(here("results/prox.qs"))
+
+prox <- qread(here("results/prox.qs"))
+
+# Create plots
+obj %>%
+  cellProximityBarplot(prox)
 ```
 
 ## Figure 4
