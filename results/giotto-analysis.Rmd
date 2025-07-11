@@ -1,5 +1,5 @@
 ---
-title: "Antigen Tracking Figures"
+title: "Xenium Giotto Analysis"
 author: "Ryan Sheridan"
 date: "`r Sys.Date()`"
 output:
@@ -12,28 +12,9 @@ output:
     self_contained: true
     highlight:      "kate"
 params:
-  template_dir:    "src"                                                                  # Rmd templates
-  so_dir:          "~/Dropbox/Ryan/Projects/antigen-exchange/results/sobjs/2024-07-01"    # Seurat objects
   xen_dir:         "~/Dropbox/Ryan/Projects/antigen-exchange/results/xenium/2024-03-22"   # Xenium objects
-  geo_dir:         "results/geo"                                                          # GEO submission files
-  sample_info:     "sample_info.xlsx"                                                     # samples names/info
   xen_res_dir: "results/xenium/20240322__194506__032224_Tamburini_Run_1"                     # Directory with Xenium data
   xen_regex:   ["output-XETG00230__0022624__[A-Z]__", "output-XETG00230__0022841__[A-Z]__"]  # Regex to pull samples for Xenium slides
-  xen_samples: 
-    value:
-      A: ["6wk", 1, 2]      # Sample identity and 6wk and 3wk barcode identity (in this order)
-      B: ["6wk", 2, 1]      # e.g. `1` indicates GeoMx-Barcode01
-      C: ["6wk-3wk", 1, 2]
-      D: ["6wk-3wk", 2, 1]
-      E: ["3wk", 2, 1]
-      F: ["3wk", 1, 2]
-  xen_ag_targets:
-    value:
-      Ag_tag_1: "GeoMx-Barcode01-ERCC00142"
-      Ag_tag_2: "GeoMx-Barcode02-ERCC00144"
-  xen_custom_targets: "ref/QX42XM_mMulti_98g_custom_sequences.csv" # Custom non-endogenous targets in panel
----
-
 ---
 
 ```{r "setup", include = FALSE}
@@ -50,8 +31,51 @@ reticulate::use_condaenv("umap", conda = "~/.local/bin/micromamba")
 
 GiottoClass::set_giotto_python_path("umap")
 
-# Main setup
-knitr::knit(here::here(params$template_dir, "setup.Rmd"), "")
+# Load packages
+# scRNA-seq
+library(Seurat)
+library(clustifyr)
+library(clustifyrdata)  # rnabioco
+library(presto)         # immunogenomics
+library(harmony)
+library(djvdj)
+library(M3Drop)
+library(hdf5r)
+
+# Plotting
+library(ggspruce)       # sheridar
+library(scales)
+library(ggforce)
+library(ggbeeswarm)
+library(cowplot)
+library(ggrepel)
+library(RColorBrewer)
+library(colorblindr)    # clauswilke
+library(patchwork)
+library(ggtext)
+library(ggtrace)
+library(ggVennDiagram)
+library(MetBrewer)
+library(ggtree)
+library(qs)
+library(openxlsx)
+library(xlsx)
+library(ComplexHeatmap)
+library(png)
+library(pzfx)
+
+# Tidyverse
+library(tidyverse)
+library(knitr)
+library(broom)
+library(here)
+library(devtools)
+library(cli)
+
+# Xenium
+library(Giotto)         # drieslab
+library(sf)
+library(sp)
 
 # Plot parameters
 min_cells <- 5
@@ -88,11 +112,6 @@ m_key <- c(
 ```{r "load xenium data", include = FALSE}
 # Xenium setup
 xen_slides <- seq_along(params$xen_regex)
-
-chunks <- xen_slides %>%
-  map_chr(~ knit_expand(here(params$template_dir, "setup-xenium.Rmd")))
-
-knit(text = chunks, output = "")
 
 # Key Xenium marker genes
 xen_gns <- c(
@@ -164,7 +183,7 @@ xen <- xen %>%
   arrange(Ag_class)
 ```
 
-```{r "giotto object", eval = FALSE}
+```{r "giotto object"}
 # Perform cell proximity analysis for section D
 prox_res <- params$xen_regex %>%
   imap(~ {
@@ -231,14 +250,6 @@ prox_df <- prox_res %>%
 prox_df %>%
   write_tsv(here("results/prox.tsv.gz"))
 ```
-
----
-
-<br>
-
-<br>
-
-## Session info
 
 ```{r "session info"}
 sessionInfo()
